@@ -26,7 +26,6 @@ class NetboxInventory:
             },
             "ungrouped": {
                 "vars": {
-                    "dns_entries": [],
                     "vlans": {}
                 }
             }
@@ -35,7 +34,7 @@ class NetboxInventory:
     def load_config(self):
         with open(os.path.join(os.path.dirname(__file__), "netbox.yml"), 'r') as stream:
             try:
-                return yaml.load(stream)
+                return yaml.safe_load(stream)
             except yaml.YAMLError as exc:
                 print(exc)
 
@@ -52,51 +51,10 @@ class NetboxInventory:
         for ip in ips:
             if ip.family == 4:
                 interfaces[ip.interface.name]['v4_address'].append(str(ip.address))
-                self.create_dns_records_v4(ip.interface.name, device, str(ip.address))
             elif ip.family == 6:
                 interfaces[ip.interface.name]['v6_address'].append(str(ip.address))
-                self.create_dns_records_v6(ip.interface.name, device, str(ip.address))
 
         return interfaces
-
-    def sanitize_dns_name(self, name):
-        return re.sub("[^a-z\d-]+", "-", name.lower())
-
-    def create_dns_record(self, domain, record_name, record_type, value):
-        return {
-           "domain": domain,
-           "record_name": record_name,
-           "record_type": record_type,
-           "record_value": value
-        }
-
-    def create_dns_records_v4(self, interface, device, ip):
-        ip = str(IPNetwork(ip).ip)
-        pre = ip.split(".")
-        record_name = pre.pop()
-        domain = ".".join(pre[::-1] + ['in-addr', 'arpa'])
-        intf = self.sanitize_dns_name(interface)
-
-        self.result['ungrouped']['vars']['dns_entries'].append(
-            self.create_dns_record(domain, record_name, "PTR", ".".join([intf, device.name, self.config['dns_name']]))
-        )
-        self.result['ungrouped']['vars']['dns_entries'].append(
-            self.create_dns_record(self.config['dns_name'], ".".join([intf, device.name, self.config['dns_name']]), "A", ip)
-        )
-
-    def create_dns_records_v6(self, interface, device, ip):
-        ip = str(IPNetwork(ip).ip)
-        pre = ip.split(".")
-        record_name = pre.pop()
-        domain = ".".join(pre[::-1] + ['in-addr', 'arpa'])
-        intf = self.sanitize_dns_name(interface)
-
-        self.result['ungrouped']['vars']['dns_entries'].append(
-            self.create_dns_record(self.config['dns_name'], ".".join([intf, device.name, self.config['dns_name']]), "AAAA", ip)
-        )
-        self.result['ungrouped']['vars']['dns_entries'].append(
-            self.create_dns_record(self.config['ipv6_ptr_domain'], IPAddress(ip).reverse_dns, "PTR", ".".join([intf, device.name, self.config['dns_name']]))
-        )
 
     def lookup_circuits(self, circuit_id, interface_id, mtu_size, interface_mode, vlans = {}):
         circuit = self.netbox.circuits.circuits.get(circuit_id)
@@ -143,18 +101,20 @@ class NetboxInventory:
             r.append(int(interface.untagged_vlan.vid))
         else:
             for v in interface.tagged_vlans:
-                self.save_vlan_global(v['vid'], v['name'])
-                r.append(int(v['vid']))
+                self.save_vlan_global(v.vid, v.name)
+                r.append(int(v.vid))
 
         return r
 
     def get_interfaces(self, device):
         interfaces = {}
         intf = self.netbox.dcim.interfaces.filter(device=device)
+        logging.debug("Interfaces: %s" % intf)
         for i in intf:
-            if i.circuit_termination is not None:
-                interfaces[i.name] = self.lookup_circuits(i.circuit_termination.circuit.id, i.id, i.mtu, self.clean_interface_mode(i.mode), self.return_vlans(i))
-            elif i.lag is not None:
+#            if i.circuit_termination is not None:
+#                interfaces[i.name] = self.lookup_circuits(i.circuit_termination.circuit.id, i.id, i.mtu, self.clean_interface_mode(i.mode), self.return_vlans(i))
+#            elif i.lag is not None:
+            if i.lag is not None:
                 interfaces[i.name] = self.return_interface(i.description, 'Bond', i.id, i.mtu, self.clean_interface_mode(i.mode), self.return_vlans(i))
                 interfaces[i.name]['bond'] = i.lag.name
             else:
@@ -222,7 +182,7 @@ class NetboxInventory:
 
             self.result["_meta"]["hostvars"][h]["interfaces"] = self.get_interfaces(host)
             if host.primary_ip != None:
-                self.result["_meta"]["hostvars"][h]['ansible_ssh_host'] = str(host.primary_ip.address.ip)
+                self.result["_meta"]["hostvars"][h]['ansible_ssh_host'] = str(host.primary_ip.address).split("/",1)[0]
 
         return self.result
 
@@ -332,7 +292,7 @@ if __name__ == "__main__":
     elif parser.parse_args().inventory_mode:
         if os.path.isfile(cache_file):
             mtime = modification_date(cache_file)
-            to_date = datetime.datetime.now() - datetime.timedelta(hours=3)
+            to_date = datetime.datetime.now() - datetime.timedelta(minutes=3)
             if mtime >= to_date:
                 load_cache(cache_file)
                 exit(0)
